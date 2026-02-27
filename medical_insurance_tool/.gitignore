@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+.streamlit/secrets.toml
+
+# Uploaded documents (may contain PII)
+data/uploads/
+exports/
+
+# Keep rate cards directory but not its contents (add your own)
+data/rate_cards/*.xlsx
+data/rate_cards/*.xls
+!data/rate_cards/RATE_CARD_FORMAT.md
