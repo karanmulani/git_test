@@ -10,7 +10,6 @@ venv/
 data/uploads/
 exports/
 
-# Keep rate cards directory but not its contents (add your own)
-data/rate_cards/*.xlsx
-data/rate_cards/*.xls
-!data/rate_cards/RATE_CARD_FORMAT.md
+# Keep rate cards directory — sample files are committed for cloud demo
+# Add your real insurer files here and they will also be committed
+!data/rate_cards/
