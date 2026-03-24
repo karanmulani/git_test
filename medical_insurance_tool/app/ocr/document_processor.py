@@ -27,10 +27,16 @@ try:
     from PIL import Image
     import cv2
     import numpy as np
+    # Verify the Tesseract binary is actually reachable
+    pytesseract.get_tesseract_version()
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
     logger.warning("pytesseract / opencv not installed – OCR disabled.")
+except Exception:
+    # Library installed but Tesseract binary not found on this system
+    OCR_AVAILABLE = False
+    logger.warning("Tesseract binary not found – OCR disabled. Install Tesseract to enable.")
 
 try:
     import pdf2image

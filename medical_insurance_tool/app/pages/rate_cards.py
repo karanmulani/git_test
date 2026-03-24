@@ -2,7 +2,7 @@
 Rate Cards management page.
 
 Allows the broker to:
-  1. Upload new Excel rate card files
+  1. Upload new Excel or PDF rate card files
   2. View loaded rate cards and their summaries
   3. Add manual rate entries (for rates received by email / quote sheet)
 """
@@ -16,11 +16,12 @@ import pandas as pd
 import streamlit as st
 
 from app.quotation import ExcelRateCard
+from app.quotation.pdf_reader import read_pdf_rate_card, pdf_tables_to_excel
 from config import RATE_CARDS_DIR, PLAN_TYPES, NETWORK_TYPES
 
 
-# ── Upload section ────────────────────────────────────────────────────────────
-def _upload_rate_card_section():
+# ── Upload Excel section ──────────────────────────────────────────────────────
+def _upload_excel_section():
     st.subheader("Upload Rate Card (Excel)")
     st.caption(
         "Upload insurer Excel rate cards. Supported layouts: age-band matrix or member-list table."
@@ -37,13 +38,14 @@ def _upload_rate_card_section():
         insurer_name = st.text_input(
             "Insurer / Product Name",
             placeholder="e.g. Daman – Basic Network",
+            key="excel_insurer_name",
         )
         sheet_name_input = st.text_input(
             "Sheet name (leave blank for first sheet)",
             placeholder="Sheet1",
         )
 
-    if uploaded and st.button("Load Rate Card", type="primary"):
+    if uploaded and st.button("Load Rate Card", type="primary", key="load_excel"):
         sheet = sheet_name_input.strip() or 0
         name = insurer_name.strip() or Path(uploaded.name).stem
 
@@ -66,42 +68,157 @@ def _upload_rate_card_section():
             st.error("Failed to parse the Excel file. Check the format and try again.")
 
 
+# ── Upload PDF section ────────────────────────────────────────────────────────
+def _upload_pdf_section():
+    st.subheader("Upload Rate Card (PDF)")
+    st.caption(
+        "Upload insurer rate sheets, benefit tables, or quote PDFs. "
+        "The tool extracts tables automatically from both digital and scanned PDFs."
+    )
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        uploaded_pdf = st.file_uploader(
+            "PDF file",
+            type=["pdf"],
+            key="pdf_rate_upload",
+        )
+    with col2:
+        pdf_insurer_name = st.text_input(
+            "Insurer / Product Name",
+            placeholder="e.g. Sukoon – Enhanced",
+            key="pdf_insurer_name",
+        )
+
+    if uploaded_pdf and st.button("Extract from PDF", type="primary", key="load_pdf"):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(uploaded_pdf.read())
+            tmp_path = tmp.name
+
+        name = pdf_insurer_name.strip() or Path(uploaded_pdf.name).stem
+
+        with st.spinner("Extracting tables from PDF..."):
+            result = read_pdf_rate_card(tmp_path, insurer_name=name)
+
+        # Show warnings
+        for w in result.get("warnings", []):
+            st.warning(w)
+
+        tables = result.get("tables", [])
+        method = result.get("method", "none")
+        detected_name = result.get("insurer_name", name)
+
+        if not tables:
+            st.error(
+                "No tables found in this PDF. Try one of these alternatives:\n"
+                "- Upload the rates as Excel instead\n"
+                "- Use the **Manual Entry** tab to enter rates by hand"
+            )
+            # Still show the extracted text so the broker can read the rates
+            text = result.get("text", "")
+            if text:
+                with st.expander("Extracted text from PDF (for reference)"):
+                    st.text(text[:5000])
+            return
+
+        st.success(
+            f"Found **{len(tables)} table(s)** via {method}. "
+            f"Detected insurer: **{detected_name}**"
+        )
+
+        # ── Preview each table ────────────────────────────────────────────────
+        for i, df in enumerate(tables):
+            st.markdown(f"**Table {i + 1}** ({len(df)} rows x {len(df.columns)} cols)")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # ── Let the user pick which table to load as a rate card ──────────────
+        st.divider()
+        st.markdown("**Load a table as rate card:**")
+
+        if len(tables) == 1:
+            table_choice = 0
+        else:
+            table_choice = st.selectbox(
+                "Select table to load",
+                options=list(range(len(tables))),
+                format_func=lambda i: f"Table {i + 1} ({len(tables[i])} rows)",
+                key="pdf_table_choice",
+            )
+
+        if st.button("Load as Rate Card", type="primary", key="load_pdf_table"):
+            # Convert the selected table to Excel, then load via ExcelRateCard
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:
+                xl_path = pdf_tables_to_excel([tables[table_choice]], tmp_xl.name)
+
+            rc = ExcelRateCard(xl_path, insurer_name=detected_name)
+            if rc.load():
+                dest = RATE_CARDS_DIR / f"{detected_name.replace(' ', '_')}_from_pdf.xlsx"
+                Path(xl_path).rename(dest)
+                rc.path = dest
+                st.session_state.engine.add_rate_card(rc)
+                st.success(
+                    f"Loaded **{detected_name}**: {rc._layout} layout, "
+                    f"{len(rc.plans)} plan(s), {len(rc.all_rates())} rate rows."
+                )
+            else:
+                st.warning(
+                    "Could not auto-detect the rate structure from this table. "
+                    "Try entering the rates via **Manual Entry** instead, "
+                    "using the table preview above as reference."
+                )
+
+        # Show full text in expander
+        text = result.get("text", "")
+        if text:
+            with st.expander("Full extracted text"):
+                st.text(text[:5000])
+
+
 # ── Loaded cards summary ───────────────────────────────────────────────────────
 def _loaded_cards_section():
     st.subheader("Loaded Rate Cards")
     engine = st.session_state.engine
 
-    if engine.rate_card_count == 0:
+    if engine.rate_card_count == 0 and len(engine._manual_entries) == 0:
         st.info(
             "No rate cards loaded yet.  \n"
-            "Upload an Excel file above, or place **.xlsx** files in the "
-            f"`{RATE_CARDS_DIR}` folder and restart the app."
+            "Upload an **Excel** or **PDF** file, or add rates via **Manual Entry**."
         )
         return
 
-    summaries = engine.rate_card_summaries()
-    df = pd.DataFrame(summaries).rename(columns={
-        "insurer": "Insurer / Product",
-        "file": "File",
-        "layout": "Layout",
-        "plans": "Plans",
-        "rate_rows": "Rate Rows",
-    })
-    df["Plans"] = df["Plans"].apply(lambda p: ", ".join(p) if isinstance(p, list) else str(p))
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    if engine.rate_card_count > 0:
+        summaries = engine.rate_card_summaries()
+        df = pd.DataFrame(summaries).rename(columns={
+            "insurer": "Insurer / Product",
+            "file": "File",
+            "layout": "Layout",
+            "plans": "Plans",
+            "rate_rows": "Rate Rows",
+        })
+        df["Plans"] = df["Plans"].apply(lambda p: ", ".join(p) if isinstance(p, list) else str(p))
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Show rate table for selected card
-    if summaries:
-        selected = st.selectbox(
-            "Inspect rates for:",
-            options=[s["insurer"] for s in summaries],
-        )
-        sel_card = next((c for c in engine._rate_cards if c.insurer_name == selected), None)
-        if sel_card:
-            rates = sel_card.all_rates()
-            if rates:
-                with st.expander(f"Rate table: {selected} ({len(rates)} rows)"):
-                    st.dataframe(pd.DataFrame(rates), use_container_width=True, hide_index=True)
+        # Show rate table for selected card
+        if summaries:
+            selected = st.selectbox(
+                "Inspect rates for:",
+                options=[s["insurer"] for s in summaries],
+            )
+            sel_card = next((c for c in engine._rate_cards if c.insurer_name == selected), None)
+            if sel_card:
+                rates = sel_card.all_rates()
+                if rates:
+                    with st.expander(f"Rate table: {selected} ({len(rates)} rows)"):
+                        st.dataframe(pd.DataFrame(rates), use_container_width=True, hide_index=True)
+
+    if engine._manual_entries:
+        st.divider()
+        st.caption(f"**{len(engine._manual_entries)}** manual rate entry/entries loaded.")
+        for entry in engine._manual_entries:
+            st.markdown(
+                f"- **{entry['insurer_name']}** – {entry['plan_name']} "
+                f"({len(entry.get('rates', []))} rate bands)"
+            )
 
 
 # ── Manual entry section ──────────────────────────────────────────────────────
@@ -109,7 +226,7 @@ def _manual_entry_section():
     st.subheader("Add Manual Rate Entry")
     st.caption(
         "Use this for rates received by email, WhatsApp, or verbal quote "
-        "that are not in an Excel file."
+        "that are not in an Excel or PDF file."
     )
 
     with st.form("manual_rate_form"):
@@ -205,13 +322,16 @@ def _manual_entry_section():
 def page_rate_cards():
     st.header("Rate Cards")
 
-    tab1, tab2, tab3 = st.tabs(["Loaded Cards", "Upload Excel", "Manual Entry"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Loaded Cards", "Upload Excel", "Upload PDF", "Manual Entry"])
 
     with tab1:
         _loaded_cards_section()
 
     with tab2:
-        _upload_rate_card_section()
+        _upload_excel_section()
 
     with tab3:
+        _upload_pdf_section()
+
+    with tab4:
         _manual_entry_section()
